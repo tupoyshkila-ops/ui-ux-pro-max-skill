@@ -34,6 +34,16 @@ python3 src/ui-ux-pro-max/scripts/search.py "<query>" --stack <stack>
 ```
 Available stacks: `html-tailwind` (default), `react`, `nextjs`, `astro`, `vue`, `nuxtjs`, `nuxt-ui`, `svelte`, `swiftui`, `react-native`, `flutter`, `shadcn`, `jetpack-compose`, `threejs`, `angular`, `laravel`, `javafx`, `wpf`, `winui`, `avalonia`, `uno`, `uwp`
 
+## Frame Sequence → Alpha Animation
+
+Assembles a folder of RGBA PNG frames (rendered character, After Effects export, Lottie-style sequence) into a single animation file with the alpha channel intact. Requires `ffmpeg` on PATH.
+
+```bash
+python3 src/ui-ux-pro-max/scripts/frames_to_alpha_video.py <frames_dir> --fps 30 --format prores4444 -o out.mov --verify
+```
+
+Formats: `prores4444` (default, `.mov`, visually lossless, editing/Safari), `webm` (VP9, smallest web file), `webp` (animated, lossless), `apng` (animated, byte-for-byte lossless). `--verify` decodes a frame back out and sanity-checks the alpha plane against the source. See the script's docstring for why alpha quality breaks (premultiplied vs straight alpha, chroma subsampling, lossy alpha compression) and per-format tradeoffs.
+
 ## Architecture
 
 ```
@@ -44,7 +54,8 @@ src/ui-ux-pro-max/                # Source of Truth
 ├── scripts/
 │   ├── search.py                 # CLI entry point
 │   ├── core.py                   # BM25 + regex hybrid search engine
-│   └── design_system.py          # Design system generation
+│   ├── design_system.py          # Design system generation
+│   └── frames_to_alpha_video.py  # PNG frame sequence -> alpha-channel animation
 └── templates/
     ├── base/                     # Base templates (skill-content.md, quick-reference.md)
     └── platforms/                # Platform configs (claude.json, cursor.json, ...)

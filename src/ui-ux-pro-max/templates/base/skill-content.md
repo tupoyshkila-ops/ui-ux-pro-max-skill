@@ -184,6 +184,16 @@ python3 skills/ui-ux-pro-max/scripts/search.py "<keyword>" --stack <stack>
 | `web` | App interface guidelines (iOS/Android/React Native) | accessibilityLabel, touch targets, safe areas, Dynamic Type |
 | `prompt` | AI prompts, CSS keywords | (style name) |
 
+### Frame Sequence → Alpha Animation
+
+Standalone tool (not part of `search.py`) for turning a folder of RGBA PNG frames into a single animation file that keeps the alpha channel intact. Requires `ffmpeg` on PATH.
+
+```bash
+python3 skills/ui-ux-pro-max/scripts/frames_to_alpha_video.py <frames_dir> --fps 30 --format prores4444 -o out.mov --verify
+```
+
+Formats: `prores4444` (default, `.mov`, visually lossless, editing/Safari), `webm` (VP9, smallest web file), `webp` (animated, lossless), `apng` (animated, byte-for-byte lossless). `--verify` decodes a frame back out and sanity-checks the alpha plane against the source.
+
 ### Available Stacks
 
 | Stack | Focus |
