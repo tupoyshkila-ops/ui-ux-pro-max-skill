@@ -14,6 +14,12 @@ Usage:
   python3 frames_to_alpha_video.py <frames_dir> --format webp -o out.webp
   python3 frames_to_alpha_video.py <frames_dir> --format apng -o out.png
   python3 frames_to_alpha_video.py <frames_dir> --verify   # sanity-check alpha after encoding
+  python3 frames_to_alpha_video.py <frames_dir> --crop --scale 2 -o out.mov
+      # crop to the visible content's bounding box, then 2x-upscale with Lanczos.
+      # Use --crop when the subject only fills a small area of a much bigger
+      # transparent canvas - editors default to showing the clip at its full
+      # canvas size, so a small subject on a big canvas reads as "tiny", and
+      # zooming it in by hand is what actually causes the pixelation.
 
 Formats (pick the smallest one that still meets your quality bar):
   prores4444 (default, .mov)  Apple ProRes 4444, 10-bit 4:4:4, 16-bit alpha
@@ -109,13 +115,87 @@ def check_alpha_present(frame: Path):
               "Output will be fully opaque.")
 
 
-def build_command(fmt, frames_dir: Path, fps: float, output: Path, quality):
+def _frame_size(png_path: Path):
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", str(png_path)],
+        capture_output=True, text=True, check=True,
+    )
+    w, h = result.stdout.strip().split("x")
+    return int(w), int(h)
+
+
+def _alpha_bbox(raw: bytes, w: int, h: int, threshold: int = 10):
+    """Bounding box (left, top, right, bottom) of pixels with alpha > threshold,
+    or None if the frame is fully transparent. Pure stdlib: bytes slicing + max()
+    do the heavy lifting in C, no numpy needed."""
+    alpha = raw[3::4]
+    top = bottom = left = right = None
+    for y in range(h):
+        if max(alpha[y * w:(y + 1) * w]) > threshold:
+            top = y
+            break
+    if top is None:
+        return None
+    for y in range(h - 1, top - 1, -1):
+        if max(alpha[y * w:(y + 1) * w]) > threshold:
+            bottom = y
+            break
+    for x in range(w):
+        if max(alpha[x::w]) > threshold:
+            left = x
+            break
+    for x in range(w - 1, left - 1, -1):
+        if max(alpha[x::w]) > threshold:
+            right = x
+            break
+    return left, top, right, bottom
+
+
+def detect_crop_box(frames, margin_ratio=0.08, sample_count=12, threshold=10):
+    """Union the alpha bounding box across a sample of frames (plus a margin) to
+    find the smallest rectangle containing all visible content. Frames are often
+    exported on a much bigger transparent canvas than the subject actually uses -
+    cropping to this box means a video editor's default 100% scale already shows
+    the subject close to full-frame, instead of tiny in a sea of transparency."""
+    w, h = _frame_size(frames[0])
+    step = max(1, len(frames) // sample_count)
+    sample = frames[::step]
+    min_x, min_y, max_x, max_y = w, h, 0, 0
+    found = False
+    for frame in sample:
+        raw = _read_rgba(frame)
+        bbox = _alpha_bbox(raw, w, h, threshold)
+        if bbox is None:
+            continue
+        left, top, right, bottom = bbox
+        min_x, min_y = min(min_x, left), min(min_y, top)
+        max_x, max_y = max(max_x, right), max(max_y, bottom)
+        found = True
+    if not found:
+        return None
+    box_w, box_h = max_x - min_x, max_y - min_y
+    margin_x = max(2, int(box_w * margin_ratio))
+    margin_y = max(2, int(box_h * margin_ratio))
+    x0 = max(0, min_x - margin_x)
+    y0 = max(0, min_y - margin_y)
+    x1 = min(w, max_x + margin_x)
+    y1 = min(h, max_y + margin_y)
+    # Even dimensions - required by yuv420p (webm) and safest for the others too.
+    cw = (x1 - x0) // 2 * 2
+    ch = (y1 - y0) // 2 * 2
+    return f"crop={cw}:{ch}:{x0}:{y0}"
+
+
+def build_command(fmt, frames_dir: Path, fps: float, output: Path, quality, vf_filters=None):
     # -pattern_type glob sorts matches lexicographically, so this works for any
     # zero-padded, consistently-named sequence without needing a printf pattern
     # or a hand-built frame list (and doesn't suffer the concat demuxer's
     # last-frame-duration quirk, which used to leak an extra duplicate frame).
     base = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
             "-framerate", str(fps), "-pattern_type", "glob", "-i", str(frames_dir / "*.png")]
+    if vf_filters:
+        base += ["-vf", ",".join(vf_filters)]
 
     if fmt == "prores4444":
         q = 9 if quality is None else quality
@@ -137,7 +217,7 @@ def build_command(fmt, frames_dir: Path, fps: float, output: Path, quality):
     return base + codec + [str(output)]
 
 
-def _read_alpha(png_path: Path):
+def _read_rgba(png_path: Path) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         raw = Path(tmp) / "raw.rgba"
         subprocess.run(
@@ -145,8 +225,11 @@ def _read_alpha(png_path: Path):
              "-i", str(png_path), "-pix_fmt", "rgba", "-f", "rawvideo", str(raw)],
             check=True,
         )
-        data = raw.read_bytes()
-    alpha = data[3::4]
+        return raw.read_bytes()
+
+
+def _read_alpha(png_path: Path):
+    alpha = _read_rgba(png_path)[3::4]
     return min(alpha), max(alpha), sum(alpha) / len(alpha)
 
 
@@ -209,6 +292,17 @@ def main():
                               "webm: -crf (0-63, lower=better, default 30). Ignored for webp/apng (always lossless).")
     parser.add_argument("--verify", action="store_true",
                          help="Decode a frame back out and sanity-check the alpha channel after encoding")
+    parser.add_argument("--crop", action="store_true",
+                         help="Auto-crop to the union bounding box of visible (alpha>10) content across a "
+                              "sample of frames, plus an 8%% margin. Use this when the subject only occupies "
+                              "a small area of a much bigger transparent canvas - a video editor's default "
+                              "100%% scale will then already show it close to full-frame, and you'll need "
+                              "far less manual zoom (which is what causes visible pixelation).")
+    parser.add_argument("--scale", type=float, default=None,
+                         help="Upscale factor applied with high-quality Lanczos filtering before encoding "
+                              "(e.g. 2 for 2x). This does not invent detail - it only avoids relying on your "
+                              "video editor's own (often lower-quality/real-time) resize. For real detail "
+                              "gain you need a higher-resolution source render or an AI upscaler.")
     args = parser.parse_args()
 
     find_ffmpeg()
@@ -232,9 +326,22 @@ def main():
     output = args.output or frames_dir.with_suffix(DEFAULT_EXT[args.format])
     output.parent.mkdir(parents=True, exist_ok=True)
 
+    vf_filters = []
+    if args.crop:
+        box = detect_crop_box(frames)
+        if box:
+            vf_filters.append(box)
+            print(f"Auto-crop: {box}")
+        else:
+            print("Auto-crop: no non-transparent content found in the sample; skipping.")
+    if args.scale:
+        vf_filters.append(f"scale=iw*{args.scale}:ih*{args.scale}:flags=lanczos")
+        print(f"Scaling {args.scale:g}x with Lanczos filtering (no new detail, just avoids a lower-quality "
+              "resize downstream).")
+
     print(f"{len(frames)} frames -> {output} ({args.format}, {fps:g}fps)")
 
-    cmd = build_command(args.format, frames_dir, fps, output, args.quality)
+    cmd = build_command(args.format, frames_dir, fps, output, args.quality, vf_filters)
     subprocess.run(cmd, check=True)
 
     size_kb = output.stat().st_size / 1024
