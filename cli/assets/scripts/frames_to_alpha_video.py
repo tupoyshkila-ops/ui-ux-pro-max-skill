@@ -104,6 +104,9 @@ def guess_fps(frames_dir: Path):
 
 
 def check_alpha_present(frame: Path):
+    """Returns the source pix_fmt (e.g. 'rgba' or 'rgba64be') so callers can size the
+    alpha plane to match - most PNG exports are 8-bit, and asking prores_ks for a
+    16-bit alpha plane on top of that just doubles the file for no real precision."""
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=pix_fmt", "-of", "default=noprint_wrappers=1:nokey=1", str(frame)],
@@ -113,6 +116,7 @@ def check_alpha_present(frame: Path):
     if "a" not in pix_fmt:
         print(f"WARNING: source frame {frame.name} decodes as '{pix_fmt}' - no alpha plane. "
               "Output will be fully opaque.")
+    return pix_fmt
 
 
 def _frame_size(png_path: Path):
@@ -187,7 +191,7 @@ def detect_crop_box(frames, margin_ratio=0.08, sample_count=12, threshold=10):
     return f"crop={cw}:{ch}:{x0}:{y0}"
 
 
-def build_command(fmt, frames_dir: Path, fps: float, output: Path, quality, vf_filters=None):
+def build_command(fmt, frames_dir: Path, fps: float, output: Path, quality, vf_filters=None, alpha_bits=8):
     # -pattern_type glob sorts matches lexicographically, so this works for any
     # zero-padded, consistently-named sequence without needing a printf pattern
     # or a hand-built frame list (and doesn't suffer the concat demuxer's
@@ -199,8 +203,11 @@ def build_command(fmt, frames_dir: Path, fps: float, output: Path, quality, vf_f
 
     if fmt == "prores4444":
         q = 9 if quality is None else quality
+        # alpha_bits should match the source's real bit depth - PNGs are almost
+        # always 8-bit, and asking for 16-bit alpha on top of an 8-bit source
+        # roughly doubles the file for zero extra precision.
         codec = ["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le",
-                 "-alpha_bits", "16", "-vendor", "apl0", "-qscale:v", str(q), "-f", "mov"]
+                 "-alpha_bits", str(alpha_bits), "-vendor", "apl0", "-qscale:v", str(q), "-f", "mov"]
     elif fmt == "webm":
         crf = 30 if quality is None else quality
         codec = ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-auto-alt-ref", "0",
@@ -312,7 +319,8 @@ def main():
         raise SystemExit(f"Not a directory: {frames_dir}")
 
     frames = discover_frames(frames_dir)
-    check_alpha_present(frames[0])
+    source_pix_fmt = check_alpha_present(frames[0])
+    alpha_bits = 16 if "64" in source_pix_fmt else 8
 
     fps = args.fps
     if fps is None:
@@ -341,7 +349,7 @@ def main():
 
     print(f"{len(frames)} frames -> {output} ({args.format}, {fps:g}fps)")
 
-    cmd = build_command(args.format, frames_dir, fps, output, args.quality, vf_filters)
+    cmd = build_command(args.format, frames_dir, fps, output, args.quality, vf_filters, alpha_bits)
     subprocess.run(cmd, check=True)
 
     size_kb = output.stat().st_size / 1024
